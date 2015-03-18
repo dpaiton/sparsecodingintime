@@ -1,16 +1,18 @@
 import sparsetime
 import numpy as np
 
-imageList = '/Users/dpaiton/Documents/Datasets/vanHatteren/imgList.txt'
+#imageList = '/Users/dpaiton/Documents/Datasets/vanHatteren/imgList.txt'
+imageList = '/Users/dpaiton/Documents/Datasets/vanHatteren/whiteImgList.txt'
 
-imgSet = sparsetime.ImageSet('van Hatteren',imageList)
+blockSize = 64  #Number of frames per movie clip
+
+imgSet = sparsetime.ImageSet('van Hatteren',imageList,blockSize)
 
 print("Loading images...")
 imgSet.loadImages()
 print("Done.")
 
 print("Whitening images...")
-blockSize = 64 
 imgSet.whitenImages(blockSize)
 print("Done.")
 

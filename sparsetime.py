@@ -30,15 +30,16 @@ class ImageSet:
     to be analyzed, separated by new lines.
     '''
 
-    def __init__(self,setName,imgListPath):
-        self.setName     = setName
-        self.imgListPath = imgListPath
-        self.loaded      = False
-        self.whitened    = False 
-        self.dataSet     = []
-        self.imgCount    = -1 
-        self.imgSizeY    = -1
-        self.imgSizeX    = -1
+    def __init__(self,setName,imgListPath,framesPerMov):
+        self.setName      = setName     #Name of dataset
+        self.imgListPath  = imgListPath #Path to .txt file that contains list of images
+        self.framesPerMov = -1          #Number of frames per movie
+        self.loaded       = False       #
+        self.whitened     = False       #
+        self.dataSet      = []          #Stored image data
+        self.imgCount     = -1          #Total number of images in dataset
+        self.imgSizeY     = -1          #Image height
+        self.imgSizeX     = -1          #Image width
 
     def loadImages(self):
         if not self.loaded:
@@ -57,7 +58,7 @@ class ImageSet:
 
             self.loaded = True
         else:
-            print("You already loaded in the image set for ",self.setName)
+            print("Already loaded in the image set for ",self.setName)
     
     def displayStats(self):
         if self.loaded:
@@ -71,6 +72,7 @@ class ImageSet:
         ## If blockSize does not divide into self.imgCount, the loop
         ## will not whiten the final (self.imgCount%blockSize) images
         ## TODO: Whiten those last few images...
+        ## TODO: Subtract mean
 
         def computePowerSpectrum(blockSize):
 
@@ -243,24 +245,6 @@ class SparseNet:
         self.sizeT          = sizeT
         self.activities     = np.zeros((sizeT,numNeurons))
         self.error          = 0
-
-
-    ## We can just compute the difference of image & recon
-    #def getError(self,imageSetArray,Dictionary):
-    #    '''
-    #    e(x,y,t) = I(x,y,t) - sum_i{sum_t'{a_i(t')phi_i(t-t')}}
-    #    '''
-    #    (sizeT,sizeYX,numElements) = Dictoinary.weightSet.shape
-    #    error = np.zeros((sizeT,sizeYX))
-    #    conv  = np.zeros((sizeYX,numElements))
-    #
-    #    # Convolution is computed across time
-    #    for tIdx in range(sizeT):
-    #        conv += np.multiply(self.activities[tIdx,:].transpose(),Dictionary.weightSet[::-1,:,:][tIdx])
-    #
-    #    error = imageSetArray - np.sum(conv,axis=1)
-    #
-    #    return error
 
 
     def sparseApproximation(self,imageSetArray,Dictionary,lambdaN,beta,sigma,eta,numIterations):

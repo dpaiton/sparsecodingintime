@@ -1,2 +1,3 @@
-# sparsecodingintime
-Implementation of BA Olshausen (2003) - Learning Sparse, Overcomplete Representations of Time-Varying Natural Images
+# Sparse Coding in Iime
+Python implementation of BA Olshausen (2003) - Learning Sparse, Overcomplete Representations of Time-Varying Natural Images
+More information to come...
