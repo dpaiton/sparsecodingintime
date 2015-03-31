@@ -7,6 +7,10 @@
    Learn space-time basis functions
    from natural scenes
 
+   Assumptions:
+     * All frames are grayscale
+     * All video clips in dataset are the same length
+
    A note on dimensionality:
      Numpy likes to specify matrices with [Z, Y, X] convention, or
      [Z, Row, Column]. Most of the adapted code uses [Y,X,T],
@@ -17,6 +21,7 @@
 import numpy as np
 import errno
 from scipy.signal import convolve
+import matplotlib.pyplot as plt
 from PIL import Image
 import os
 import pdb
@@ -30,16 +35,16 @@ class ImageSet:
     to be analyzed, separated by new lines.
     '''
 
-    def __init__(self,setName,imgListPath,framesPerMov):
-        self.setName      = setName     #Name of dataset
-        self.imgListPath  = imgListPath #Path to .txt file that contains list of images
-        self.framesPerMov = -1          #Number of frames per movie
-        self.loaded       = False       #
-        self.whitened     = False       #
-        self.dataSet      = []          #Stored image data
-        self.imgCount     = -1          #Total number of images in dataset
-        self.imgSizeY     = -1          #Image height
-        self.imgSizeX     = -1          #Image width
+    def __init__(self,setName,imgListPath,framesPerMov=-1):
+        self.setName      = setName      # Name of dataset
+        self.imgListPath  = imgListPath  # Path to .txt file that contains list of images
+        self.framesPerMov = framesPerMov # Number of frames per movie
+        self.loaded       = False        # 
+        self.whitened     = False        # 
+        self.dataSet      = []           # Stored image data
+        self.imgCount     = -1           # Total number of images in dataset
+        self.imgSizeY     = -1           # Image height
+        self.imgSizeX     = -1           # Image width
 
     def loadImages(self):
         if not self.loaded:
@@ -54,6 +59,10 @@ class ImageSet:
                     self.dataSet.append(imgDat)
 
             self.imgCount = len(self.dataSet)
+
+            if self.framesPerMov == -1:
+                self.framesPerMov = self.imgCount
+
             (self.imgSizeY,self.imgSizeX) = self.dataSet[0].shape
 
             self.loaded = True
@@ -204,17 +213,30 @@ class ImageSet:
             print("You have to load the images before you can whiten them.")
 
 
-    def getRandPatch(self,patchSizeT,patchSizeY,patchSizeX):
-        # Get a random patch in space and time
+    def getRandPatch(self,patchSizeY,patchSizeX):
+        # Get a random patch in space, but contiguous in time 
+        # If dataset contains multiple movies (i.e. framesPerMov != imgCount), it will pick a random movie
         # Parameters specify the patch size, image size is property of class
+        # It will always make the movie self.framesPerMov long
         # Upper bound on rand is exclusive
-        randY  = np.random.randint(0,self.imgSizeY-patchSizeY)
-        randX  = np.random.randint(0,self.imgSizeX-patchSizeX)
-        randT  = np.random.randint(0,self.imgCount-patchSizeT)
-        patchT = np.array(self.dataSet[randT:randT+patchSizeT])
-        patch  = patchT[:,randY:randY+patchSizeY,randX:randX+patchSizeX]
 
-        return patch.reshape(patchSizeT,patchSizeY*patchSizeX)
+        if self.loaded:
+            numMovies = self.imgCount / self.framesPerMov # Assumes all movies are the same length
+
+            randY   = np.random.randint(0,self.imgSizeY-patchSizeY)
+            randX   = np.random.randint(0,self.imgSizeX-patchSizeX)
+
+            randMov = np.random.randint(0,numMovies)
+
+            startFrame = randMov * self.framesPerMov
+
+            patchT  = np.array(self.dataSet[startFrame:startFrame+self.framesPerMov])
+            patch   = patchT[:,randY:randY+patchSizeY,randX:randX+patchSizeX]
+
+            return patch.reshape(self.framesPerMov,patchSizeY*patchSizeX)
+        else:
+            print("You have to load the images before you can whiten them.")
+            return -1
 
     def writeImages(self,imgWritePath,imgIndices=-1):
         if imgIndices == -1:
@@ -240,11 +262,13 @@ class SparseNet:
     Presumes square dictionary elements as input
     '''
 
-    def __init__(self,sizeT,numNeurons):
-        self.numNeurons     = numNeurons
-        self.sizeT          = sizeT
-        self.activities     = np.zeros((sizeT,numNeurons))
-        self.error          = 0
+    def __init__(self,Dictionary,setSizeT):
+        (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
+        self.numNeurons = numElements 
+        self.setSizeT   = setSizeT
+        # activities are initialized to the size of the image set minus a margin on either end to resolve convolution edge effects
+        self.activities = np.zeros((setSizeT-dictSizeT,numElements)) #TODO: activity initialization is a bit clunky...
+        self.error      = np.zeros((setSizeT,sizeYX))
 
 
     def sparseApproximation(self,imageSetArray,Dictionary,lambdaN,beta,sigma,eta,numIterations):
@@ -265,58 +289,84 @@ class SparseNet:
         da_i(t)/dt <- lambda_N sum_x,y{ sum_t{ phi_i(x,y,-t) (I(x,y,t) - sum_i{sum_t'{a_i(t')phi_i(t-t')}})}} - S'(a_i(t))
            where S'(a_i(t)) = (2 beta a_i(t) a'_i(t)) / (sigma^2 + a_i(t)^2)
         '''
-        # First iteration
-        (sizeT, sizeYX, numElements) = Dictionary.weightSet.shape
-        if np.all(self.activities==0):
-            # Initial activity is the time-correlation between the dictionary element & the input
-            for tIdx in range(sizeT):
-                self.activities += np.dot(image,Dictionary.weightSet[tIdx,:,:])
-
-            # Normalize activities wrt weight gain coefficients
-            self.activities = np.multiply(self.activities,1./np.tile(np.squre(Dictionary.gain),(sizeT,1)))
-
-        recon = getReconstruction(Dictionary)
-
-        self.error = imageSetArray - recon
-
-        E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma),axis=0))/sizeT
-
-        for iteration in range(numIterations-1):
-            grada = 0
-            for tIdx in range(sizeT):
-                grada += lambdaN * np.dot(self.error[tIdx,:],Dictionary.weightSet[tIdx,:,:])
-
-            grada -= (beta/sigma) * Sp(self.activities/sigma)
-
-            da = eta*grada
-            a += da
-
-            for tIdx in range(sizeT):
-                recon[tIdx,:] += np.dot(Dictionary.weightSet[tIdx,:,:]*da[tIdx,:].transpose())
-
-            self.error = imageSetArray - recon
-            Eold = E
-            E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma)))/sizeT
-            if (E - Eold) > 0:
-                self.activities[:] = 0
-                break
-            
         def S(a):
             'Sparse cost function'
             sparseCost = np.log(1+np.multiply(a,a))
+            return sparseCost
 
         def Sp(a):
             'Derivative of sparse cost function'
             sPrime = np.multiply(2*a,1./(1+np.multiply(a,a)))
+            return sPrime
 
 
+        (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
 
-    def getReconstruction(self,Dictionary,saveRecon=False,reconSavePath=''):
-        (sizeT, sizeXY, numElements) = Dictionary.weightSet.shape
-        recon = np.zeros((sizeT,sizeXY))
-        for tIdx in range(sizeT):
-            recon[tIdx,:] = np.sum(np.multiply(self.activities[tIdx,:],Dictionary.weightSet[tIdx,:,:]),axis=1)
+        margin       = np.floor(dictSizeT/2) # Time buffer of zeros to stop edge effects with convolution. Assumes dictSizeT is odd.
+        startBuffIdx = np.arange(0,margin,dtype=np.int)
+        endBuffIdx   = np.arange(self.setSizeT-margin,self.setSizeT,dtype=np.int)
+        numValid     = self.setSizeT - 2*margin # number of valid entries in image array
 
+        imageSetArray[startBuffIdx,:] = 0
+        imageSetArray[endBuffIdx,:]   = 0
+
+        #TODO: Activity array might be too large - Bruno doesn't index with the window
+        # First iteration
+        if np.all(self.activities==0): # Check to make sure we are not using a pre-initialized activity set
+            # Initial activity is the time-correlation between the dictionary element & the input
+            for tIdx in range(dictSizeT):
+                imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
+                # Sum to get average response for dictionary at across the whole input scene
+                self.activities += np.dot(imageSetArray[imgSetWindow,:],Dictionary.weightSet[tIdx,:,:])
+        
+            # Normalize activities wrt weight gain coefficients
+            self.activities = np.multiply(self.activities,1./np.tile(np.square(Dictionary.gain),(self.activities.shape[0],1)))
+
+        recon = self.getReconstruction(Dictionary)
+
+        self.error = imageSetArray - recon
+        self.error[startBuffIdx,:] = 0
+        self.error[endBuffIdx,:]   = 0
+
+        E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma)))/numValid
+
+        # The rest of the iterations
+        for iteration in range(numIterations-1):
+            grada = 0
+            for tIdx in range(dictSizeT):
+                imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
+                grada += lambdaN * np.dot(self.error[imgSetWindow,:],Dictionary.weightSet[tIdx,:,:])
+
+            grada -= (beta/sigma) * Sp(self.activities/sigma)
+
+            da = eta*grada
+            self.activities += da
+
+            recon = self.getReconstruction(Dictionary,da)
+
+            self.error = imageSetArray - recon
+            self.error[startBuffIdx,:] = 0
+            self.error[endBuffIdx,:]   = 0
+
+            Eold = E
+            E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma)))/numValid
+            if (E - Eold) > 0:
+                self.activities[:] = 0
+                break
+            
+
+    def getReconstruction(self,Dictionary,activity=-1,saveRecon=False,reconSavePath=''):
+        if type(activity) is not np.ndarray: # If activity has not been given as input, use member variable
+            activity = self.activities
+
+        (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
+
+        recon = np.zeros((self.setSizeT,sizeYX))
+        for tIdx in range(dictSizeT):
+            imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
+            recon[imgSetWindow,:] += np.dot(activity,Dictionary.weightSet[tIdx,:,:].transpose())
+
+        #TODO: Save recon stuff
         return recon
 
 
@@ -342,18 +392,23 @@ class Dictionary:
         self.patchSize   = weightPatchSize
         self.numElements = numElements
         
-        self.weightSet   = np.zeros((sizeT,weightPatchSize,numElements))
+        self.weightSet   = np.zeros((weightSizeT,weightPatchSize,numElements))
+
+        if type(initMode) is str:
+            initType = initMode
+        elif type(initMode) is tuple:
+            initType = initMode[0]
 
         #TODO: Implement other initialization modes
-        if initMode[0] == 'rand':
-            self.weightSet[:,:,:] = np.random.rand(sizeT,weightPatchSize,numElements)
+        if initType == 'rand':
+            self.weightSet[:,:,:] = np.random.rand(weightSizeT,weightPatchSize,numElements)
 
         self.gain = np.sqrt(np.sum(np.sum(np.multiply(self.weightSet,self.weightSet),axis=1),axis=0)).transpose()
 
         self.initialized = True
 
 
-    def computeUpdates(self,SparseNet,dPhi):
+    def computeUpdates(self,sparseNet,dPhi):
         '''
         Compute cumulative dw based on weight update rule
 
@@ -370,9 +425,10 @@ class Dictionary:
             phiDim = tuple containing size of phi, which is (sizeT,patchSize,numElements) 
         '''
         if self.initialized:
-            (sizeT, sizeYX, numElements) = dPhi.shape
-            for timeIdx in range(sizeT):
-                dPhi += SparseNet.activities.transpose() * SparseNet.getError()[::-1]
+            (dictSizeT, sizeYX, numElements) = dPhi.shape
+            for tIdx in range(dictSizeT):
+                imgSetWindow = np.arange(tIdx,sparseNet.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
+                dPhi[tIdx,:,:] += np.dot(sparseNet.error[imgSetWindow,:].transpose(),sparseNet.activities)
 
             return dPhi
         else:
@@ -399,11 +455,31 @@ class Dictionary:
         alpha is the rate of adaptation
 
         '''
-
         self.gain = np.multiply(self.gain,(aVar/varGoal)**alpha)
-        normPhi = np.sqrt(np.sum(np.sum(np.multilpy(self.weightSet,self.weightSet),axis=1),axis=0))
+        normPhi = np.sqrt(np.sum(np.sum(np.multiply(self.weightSet,self.weightSet),axis=1),axis=0))
         for elm in range(self.numElements):
-            self.weightSet[:,:,elm] = gain[elm] * self.weightSet[:,:,elm] / normPhi[elm]
+            self.weightSet[:,:,elm] = self.gain[elm] * self.weightSet[:,:,elm] / normPhi[elm]
+
+
+    def plotWeights(self,margin=4):
+        '''
+        Plots weights
+
+        Assumes that patches are square
+        '''
+        patchSide = np.sqrt(self.PatchSize)
+        # Out matrix is backwards from normal convention (elements-by-time instead of the other way around).
+        # This is so that it is formatted for matplotlib.
+        dispWeights = np.zeros((self.numElements*(patchSide+margin),self.sizeT*(patchSide+margin)))
+        
+        epos = 0
+        tpos = 0
+        for elmIdx in range(self.numElements): # element traverses rows 
+            for tIdx in range(self.sizeT): # t traverses columns 
+                dispWeights[
+
+
+
 
     #def saveWeights(self,savePath):
         # save the weights to file
