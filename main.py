@@ -66,7 +66,7 @@ sparseNet = sparsetime.SparseNet(Phi,blockSize) # Must be initialized with a dic
 
 
 for i in range(batchSize):
-    print("Batch number "+str(i+1)+" out of "+str(batchSize)+"...")
+    print("Batch number "+str(i+1).zfill(2)+" out of "+str(batchSize).zfill(2)+"...")
     while sparseNet.activities.all == 0:
         imagePatch = imgSet.getRandPatch(dictSizeY,dictSizeX)
         updateRateMod = 1 
@@ -75,6 +75,7 @@ for i in range(batchSize):
             updateRateMod *= 2
     dPhi = Phi.computeUpdates(sparseNet,dPhi)
     aVar = (1-var_eta) * aVar + var_eta * np.sum(np.multiply(sparseNet.activities,sparseNet.activities),axis=0)/numValid
+    Phi.plotWeights(margin=4,numElements=10,indices=[0,1,2,3,4,5,6,7,8,9])
 dPhi /= batchSize * numValid 
 Phi.updateWeights(dPhi,weight_eta)
 Phi.normalizeWeights(aVar,varGoal,sigma,alpha)

@@ -461,22 +461,48 @@ class Dictionary:
             self.weightSet[:,:,elm] = self.gain[elm] * self.weightSet[:,:,elm] / normPhi[elm]
 
 
-    def plotWeights(self,margin=4):
+    def plotWeights(self,margin=4,numElements=-1,indices='all'):
         '''
         Plots weights
 
         Assumes that patches are square
         '''
-        patchSide = np.sqrt(self.PatchSize)
+        patchSide = np.sqrt(self.patchSize)
+
+        if numElements == -1:
+            numElements = self.numElements
+            indices = 'all'
+
+        if indices is 'rand':
+            elementIndices = np.random.random_integers(0,self.numElements-1,numElements)
+        elif indices is 'all':
+            elementIndices = range(numElements)
+        else:
+            elementIndices = indices
+
         # Out matrix is backwards from normal convention (elements-by-time instead of the other way around).
         # This is so that it is formatted for matplotlib.
-        dispWeights = np.zeros((self.numElements*(patchSide+margin),self.sizeT*(patchSide+margin)))
+        dispWeights = np.zeros((numElements*(patchSide+margin),self.sizeT*(patchSide+margin)))
         
-        epos = 0
-        tpos = 0
-        for elmIdx in range(self.numElements): # element traverses rows 
-            for tIdx in range(self.sizeT): # t traverses columns 
-                dispWeights[
+        dictElement = np.zeros((patchSide+margin,patchSide+margin))
+        halfMargin  = np.floor(margin/2)
+        xpos = 0
+        ypos = 0
+        for elmIdx in elementIndices: # element traverses rows 
+            for tIdx in range(self.sizeT):     # t traverses columns 
+                dictElement[halfMargin:halfMargin+patchSide,halfMargin:halfMargin+patchSide] = self.weightSet[tIdx,:,elmIdx].reshape(patchSide,patchSide)
+                dispWeights[ypos:ypos+patchSide+margin,xpos:xpos+patchSide+margin] = dictElement
+
+                xpos += patchSide+margin
+                if xpos > dispWeights.shape[1]-(patchSide+margin):
+                    ypos += patchSide+margin
+                    xpos = 0
+
+        plt.figure()
+        plt.imshow(dispWeights,cmap='Greys',interpolation='nearest')
+        plt.show(block=False)
+
+                
 
 
 
