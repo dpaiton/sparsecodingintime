@@ -11,20 +11,28 @@
      * All frames are grayscale
      * All video clips in dataset are the same length
 
-   A note on dimensionality:
-     Numpy likes to specify matrices with [Z, Y, X] convention, or
-     [Z, Row, Column]. Most of the adapted code uses [Y,X,T],
-     but I follow numpy's [T,Y,X] convention.
+   Matrices follow the Numpy [T(time),Y(row),X(column)] convention.
 
 """
 
-import numpy as np
-import errno
-from scipy.signal import convolve
-import matplotlib.pyplot as plt
-from PIL import Image
 import os
-import pdb
+import errno
+
+from scipy.signal import convolve
+import numpy as np
+import matplotlib.pyplot as plt
+import skimage.io as io
+from PIL import Image
+
+import IPython
+
+def _normalize(mat):
+    if np.min(mat) == np.max(mat):
+        return mat
+    else:
+        return (mat - np.min(mat)) / (np.max(mat) - np.min(mat))
+        #normVal = np.max([np.abs(np.max(mat)), np.abs(np.min(mat))])
+        #return mat / normVal
 
 class ImageSet:
     '''
@@ -35,10 +43,11 @@ class ImageSet:
     to be analyzed, separated by new lines.
     '''
 
-    def __init__(self,setName,imgListPath,framesPerMov=-1):
+    def __init__(self, setName, imgListPath, varData, framesPerMov=-1):
         self.setName      = setName      # Name of dataset
         self.imgListPath  = imgListPath  # Path to .txt file that contains list of images
         self.framesPerMov = framesPerMov # Number of frames per movie
+        self.varData      = varData      # Variance of data after whitening
         self.loaded       = False        # 
         self.whitened     = False        # 
         self.dataSet      = []           # Stored image data
@@ -50,6 +59,7 @@ class ImageSet:
         if not self.loaded:
             with open(self.imgListPath,'r') as fileStream:
                 for line in fileStream: # each line is an absolute path to the image file
+                    #TODO: Switch this to skimage instead of PIL
                     img = Image.open(line[0:-1]) # lines end with a '\n' char, which we don't want
                     #TODO: Don't hardcode for greyscale images
                     if img.mode is not 'L':
@@ -76,12 +86,16 @@ class ImageSet:
             print("Load images before requesting stats.")
 
     def whitenImages(self, blockSize=-1):
-        ## Whitening code adapted from work by Charles Frye and Bruno Olshausen
-        ## To reduce complications, cube space-time blocks is required
-        ## If blockSize does not divide into self.imgCount, the loop
-        ## will not whiten the final (self.imgCount%blockSize) images
-        ## TODO: Whiten those last few images...
-        ## TODO: Subtract mean
+        '''
+         To reduce complications, cube space-time blocks is required
+         If blockSize does not divide into self.imgCount, the loop
+         will not whiten the final (self.imgCount%blockSize) images
+         TODO: Whiten those last few images...
+         TODO: Subtract mean
+         TODO: This code does spatial whitening * time LPF.
+               I need to write an alternative function that
+               performs joint whitening over space & time.
+        '''
 
         def computePowerSpectrum(blockSize):
 
@@ -98,112 +112,106 @@ class ImageSet:
             # Generate a gaussian window function
             fspace = np.meshgrid(freqsT,freqsY,freqsX,indexing='ij')
 
-            # G = exp( -0.5 * ( [(FX.*FX + FY.*FY) / (nyqY/2)^2] + [FT.*FT / (nyqT/2)^2] ) )
-            gauss = np.exp(-0.5*((np.multiply(fspace[1],fspace[1])+np.multiply(fspace[2],fspace[2]))/np.square(nyqY/2)+np.multiply(fspace[0],fspace[0])/np.square(nyqT/2)))
+            # G = exp( -0.5 * ( (FT/(nyqT/2))^2 + (FY/(nyqY/2))^2 + (FX/(nyqX/2))^2 ) )
+            gauss = np.exp(-0.5 * (np.square(fspace[0]/(nyqT/2)) +
+                np.square(fspace[1]/(nyqY/2)) +
+                np.square(fspace[2]/(nyqX/2))))
 
             powerSpec = np.zeros((blockSize,self.imgSizeY,self.imgSizeX))
 
-            for block in range(0,self.imgCount-(self.imgCount%blockSize),blockSize):
+            trange = range(0,self.imgCount-(self.imgCount%blockSize),blockSize)
+
+            for block in trange:
                 dataArray = np.array(self.dataSet[block:block+blockSize]) #[T,Y,X] array
+                dataArray = (dataArray - np.min(dataArray)) / (np.max(dataArray) - np.min(dataArray))
+                dataArray = dataArray * gauss
+                blockFT   = np.fft.fftn(dataArray,axes=(0,1,2))
+                powerSpec = np.multiply(blockFT,np.conjugate(blockFT)).real
 
-                dataArray  = np.multiply(dataArray,gauss)
-                blockFT    = np.fft.fftn(dataArray,axes=(0,1,2))
-                pdb.set_trace()
-                powerSpec += np.multiply(blockFT,np.conjugate(blockFT)) #TODO:Is this just getting the real portion?
-
-            powerSpec = powerSpec/np.float64(len(range(0,self.imgCount-(self.imgCount%blockSize),blockSize)))
+            powerSpec = powerSpec/np.float64(len(trange))
 
             return powerSpec
 
-
         def rotationalAverage(powSpec):
-            'Compute rotational average of power spectrum (P) with dimensions [time spat freq, radial spat freq]'
-            (sizeT,sizeY,sizeX) = powSpec.shape
+            '''
+            Compute rotational average of power spectrum (P) with dimensions [time spat freq, radial spat freq]
+            Only works for greyscale imagery
+            '''
 
-            nyqY = np.int32(np.floor(sizeY/2))
-            nyqX = np.int32(np.floor(sizeX/2))
+            dims = powSpec.shape
 
-            freqsY = np.linspace(-nyqY,nyqY-1,num=sizeY)
-            freqsX = np.linspace(-nyqX,nyqX-1,num=sizeX)
+            nyq = np.int32(np.floor(np.array(dims)/2.0))
 
-            fspace = np.meshgrid(freqsY,freqsX,indexing='ij')
-            rho = np.round(np.sqrt(np.square(fspace[0])+np.square(fspace[1])))
-            
-            indices = [None] * nyqY
-            for rad in range(nyqY):
-                indices[rad] = np.where(rho.ravel() == rad)[0]
-            
-            rotAvg = np.zeros((sizeT,nyqY))
+            freqs = [np.linspace(-nyq[i],nyq[i]-1,num=dims[i]) for i in range(len(dims))]
 
-            for tIdx in range(sizeT):
-                tmp = powSpec[tIdx,:,:]
-                for rad in range(nyqY):
-                    rotAvg[tIdx,rad] = np.mean(tmp.ravel()[indices[rad]])
+            if len(dims) == 3: # time domain included, and expected to be first dim
+                fspace = np.meshgrid(freqs[1], freqs[2],indexing='ij')
+
+                # Rho is cartesian coordinate for (x,y) in Fourier space
+                rho = np.round(np.sqrt(np.square(fspace[0])+np.square(fspace[1])))
+                
+                rotAvg = np.zeros((dims[0],rho.shape[0]))
+                for time in range(dims[0]):
+                    tmp = powSpec[time,:,:]
+                    for rad in range(rho.shape[0]):
+                        if np.isnan(np.mean(tmp[rho == rad])):
+                            rotAvg[time,rad] = 0
+                        else:
+                            rotAvg[time,rad] = np.mean(tmp[rho == rad])
+            else:
+                fspace = np.meshgrid(freqs[0],freqs[1],indexing='ij')
+                rho = np.sqrt(np.square(fspace[0])+np.square(fspace[1]))
+
+                rotAvg = np.zeros(rho.shape[0])
+                for rad in range(rho.shape[0]):
+                    if np.isnan(np.mean(powSpec[rho == rad])):
+                        rotAvg[rad] = 0
+                    else:
+                        rotAvg[rad] = np.mean(powSpec[rho == rad])
 
             return rotAvg
-
 
         if blockSize == -1:
             blockSize = self.imgCount
 
         if self.loaded:
-            nyqT = np.int32(np.floor(blockSize/2))
-            nyqY = np.int32(np.floor(self.imgSizeY/2))
-            nyqX = np.int32(np.floor(self.imgSizeX/2))
+            white_filt = np.zeros((blockSize, self.imgSizeY, self.imgSizeX))
 
-            # Multiplier acquired from Bruno's code - not sure how it is derived
-            sigT = 0.78125*nyqT
-            sigY = 0.78125*nyqY
-            sigX = 0.78125*nyqX
+            nyq = np.array((np.int32(np.floor(self.imgSizeY/2.0)),
+                   np.int32(np.floor(self.imgSizeX/2.0))))
 
-            freqsY = np.linspace(-nyqY,nyqY-1,num=self.imgSizeY)
-            freqsX = np.linspace(-nyqX,nyqX-1,num=self.imgSizeX)
-
-            # Rho is the ramp function for whitening in the spatial dimension
-            fspace = np.meshgrid(freqsY,freqsX,indexing='ij')
-            rho    = np.sqrt(np.square(fspace[0])+np.square(fspace[1]))
+            # Ramp function to whiten
+            grid = np.mgrid[-nyq[0]:nyq[0]+(self.imgSizeY%(nyq[0]*2)), -nyq[1]:nyq[1]+(self.imgSizeX%(nyq[1]*2))]
+            ramp_filter = _normalize(np.sqrt(np.square(grid[0]) + np.square(grid[1])))
             
-            # Time portion of LPF
-            lowPassTime = np.exp(-(rho/sigT)**4) #TODO:Why **4?
+            # spatial Gaussian Low Pass Filter
+            sig = 0.78125*nyq # Cutoff frequencies
+            spatial_LPF = np.exp(-0.5*(np.square(ramp_filter/(sig[0]/2.0)) + np.square(ramp_filter/(sig[1]/2.0))))
 
-            rho = np.int32(np.round(rho))
+            nyq_t = np.int32(np.floor(blockSize/2.0))
+            sig_t = 0.78125 * nyq_t
 
-            filtIdx = np.where(rho.ravel() <= nyqX-1)[0] 
+            for time in range(blockSize):
+                FT = time - nyq_t
+                time_LPF = np.exp(-0.5*np.square(-FT/(sig_t/2.0)))
+                white_filt[time,:,:] = ramp_filter * spatial_LPF * time_LPF 
 
-            filtf   = np.zeros((blockSize,self.imgSizeY,self.imgSizeX))
-
-            powerSpec = computePowerSpectrum(blockSize)
-            rotAvg    = rotationalAverage(powerSpec)
-
-            for timeIdx in range(blockSize):
-                FT = timeIdx-nyqT
-                filt_time = np.zeros((self.imgSizeY,self.imgSizeX))
-
-                # Multiply low pass time filter with spatial filter
-                filt_time.ravel()[filtIdx] = np.multiply(lowPassTime.ravel()[filtIdx]*np.exp(-(FT/nyqT)**4),1./np.sqrt(rotAvg[np.abs(FT),rho.ravel()[filtIdx]]))
-                filtf[timeIdx,:,:] = filt_time
-
-            filtf[nyqT,nyqX,nyqY] = 0 # zero out the center frequency (DC value)
-            filtf = np.fft.fftshift(filtf,axes=(0,1,2))
+            white_filt = np.fft.fftshift(white_filt,axes=(0,1,2))
+            white_filt[nyq_t,nyq[0],nyq[1]] = 0 # zero out the center frequency (DC value)
 
             for block in range(0,self.imgCount-(self.imgCount%blockSize),blockSize):
-                dataArray    = np.array(self.dataSet[block:block+blockSize]) #[T,Y,X] array
-                blockFT      = np.fft.fftshift(np.fft.fftn(dataArray,axes=(0,1,2)),axes=(0,1,2))
+                dataArray = _normalize(np.array(self.dataSet[block:block+blockSize])) #[T,Y,X] array
+                blockFT   = np.fft.fftn(dataArray,axes=(0,1,2))
 
                 # Multilpy data by filter in fourier space
-                blockFT_wht  = np.multiply(blockFT,filtf)
-                blockIFT_wht = np.real(np.fft.ifftn(np.fft.ifftshift(blockFT_wht,axes=(0,1,2)),axes=(0,1,2)))
+                blockIFT_wht = np.fft.ifftn(white_filt * blockFT, axes=(0,1,2)).real
 
-                blockIFT_wht = np.sqrt(0.1)*blockIFT_wht/np.std(blockIFT_wht)
+                # Set variance of data to self.varData
+                blockIFT_wht = np.sqrt(self.varData)*blockIFT_wht/np.std(blockIFT_wht)
 
-                # Turn it into an image
-                if np.min(blockIFT_wht)<0:
-                    blockImg_wht = blockIFT_wht + np.abs(np.min(blockIFT_wht))
-                else:
-                    blockImg_wht = blockIFT_wht - np.min(blockIFT_wht)
-
-                blockImg_wht = 255 * (blockImg_wht/np.max(blockImg_wht))
-
+                # Reformat for writing
+                blockImg_wht = 255 * _normalize(blockIFT_wht)
+                
                 #TODO: There must be a better way to do this...
                 for i in range(block,block+blockSize):
                     self.dataSet[i] = blockImg_wht[i-block,:,:]
@@ -235,7 +243,7 @@ class ImageSet:
 
             return patch.reshape(self.framesPerMov,patchSizeY*patchSizeX)
         else:
-            print("You have to load the images before you can whiten them.")
+            print("You have to load the images before you can get a patch.")
             return -1
 
     def writeImages(self,imgWritePath,imgIndices=-1):
@@ -267,7 +275,7 @@ class SparseNet:
         self.numNeurons = numElements 
         self.setSizeT   = setSizeT
         # activities are initialized to the size of the image set minus a margin on either end to resolve convolution edge effects
-        self.activities = np.zeros((setSizeT-dictSizeT,numElements)) #TODO: activity initialization is a bit clunky...
+        self.activities = np.zeros((setSizeT-dictSizeT,numElements)) 
         self.error      = np.zeros((setSizeT,sizeYX))
 
 
@@ -276,11 +284,11 @@ class SparseNet:
         Compute activities from a given dictionary & image set
 
         lambdaN - 
-        beta    - 
-        sigma   - 
+        beta    - sparseness
+        sigma   - scaling
         eta     - update rate for activities
 
-        a = argmin_a [ lambda_N/2 |I(x,y,t) - sum_i {a_i * phi_i(x,y,t)}|^2 + sum_i{sum_t{S(a_i(t))}} ]
+        E = argmin_a [ lambda_N/2 |I(x,y,t) - sum_i {a_i * phi_i(x,y,t)}|^2 + sum_i{sum_t{S(a_i(t))}} ]
            where S(a_i(t)) = beta log(1 + (a_i(t)/sigma)^2), beta controls sparseness, sigma is scaling
 
         da/dt \propto lambda_N sum_x,y { corr(phi_i(x,y,t) , e(x,y,t)) - S'(a_i(t))}
@@ -289,84 +297,97 @@ class SparseNet:
         da_i(t)/dt <- lambda_N sum_x,y{ sum_t{ phi_i(x,y,-t) (I(x,y,t) - sum_i{sum_t'{a_i(t')phi_i(t-t')}})}} - S'(a_i(t))
            where S'(a_i(t)) = (2 beta a_i(t) a'_i(t)) / (sigma^2 + a_i(t)^2)
         '''
+
         def S(a):
             'Sparse cost function'
-            sparseCost = np.log(1+np.multiply(a,a))
-            return sparseCost
+            return np.log(1 + np.multiply(a, a))
 
         def Sp(a):
             'Derivative of sparse cost function'
-            sPrime = np.multiply(2*a,1./(1+np.multiply(a,a)))
-            return sPrime
-
+            return np.multiply(2 * a, 1. / (1 + np.multiply(a, a)))
 
         (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
 
+        energy       = np.zeros((numIterations))
+        error        = np.zeros((numIterations,self.setSizeT,sizeYX))
         margin       = np.floor(dictSizeT/2) # Time buffer of zeros to stop edge effects with convolution. Assumes dictSizeT is odd.
+        numValid     = self.setSizeT - 2 * margin # number of valid entries in image array
         startBuffIdx = np.arange(0,margin,dtype=np.int)
         endBuffIdx   = np.arange(self.setSizeT-margin,self.setSizeT,dtype=np.int)
-        numValid     = self.setSizeT - 2*margin # number of valid entries in image array
 
         imageSetArray[startBuffIdx,:] = 0
         imageSetArray[endBuffIdx,:]   = 0
 
-        #TODO: Activity array might be too large - Bruno doesn't index with the window
-        # First iteration
+        # Set activity to dot product on first iteration
         if np.all(self.activities==0): # Check to make sure we are not using a pre-initialized activity set
             # Initial activity is the time-correlation between the dictionary element & the input
             for tIdx in range(dictSizeT):
-                imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
+                imgSetWindow = np.arange(tIdx, self.setSizeT-(dictSizeT-tIdx), dtype=int) # Sliding window to compute activity
                 # Sum to get average response for dictionary at across the whole input scene
-                self.activities += np.dot(imageSetArray[imgSetWindow,:],Dictionary.weightSet[tIdx,:,:])
+                self.activities = np.dot(imageSetArray[imgSetWindow,:], Dictionary.weightSet[tIdx,:,:])
         
             # Normalize activities wrt weight gain coefficients
-            self.activities = np.multiply(self.activities,1./np.tile(np.square(Dictionary.gain),(self.activities.shape[0],1)))
+            self.activities = np.multiply(self.activities,
+                    1. / np.tile(np.square(Dictionary.gain), (self.activities.shape[0], 1)))
 
         recon = self.getReconstruction(Dictionary)
 
-        self.error = imageSetArray - recon
-        self.error[startBuffIdx,:] = 0
-        self.error[endBuffIdx,:]   = 0
+        error[0,:,:] = imageSetArray - recon
+        error[0,startBuffIdx,:] = 0
+        error[0,endBuffIdx,:]   = 0
 
-        E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma)))/numValid
+        energy[0] = (1.5 * lambdaN * np.sum(np.square(error[0,:,:])) + beta * np.sum(S(self.activities/sigma)))/numValid
 
         # The rest of the iterations
-        for iteration in range(numIterations-1):
+        for iteration in range(1,numIterations):
             grada = 0
             for tIdx in range(dictSizeT):
                 imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
-                grada += lambdaN * np.dot(self.error[imgSetWindow,:],Dictionary.weightSet[tIdx,:,:])
+                grada += lambdaN * np.dot(error[iteration,imgSetWindow,:], Dictionary.weightSet[tIdx,:,:])
 
             grada -= (beta/sigma) * Sp(self.activities/sigma)
 
-            da = eta*grada
-            self.activities += da
+            self.activities += eta * grada 
 
-            recon = self.getReconstruction(Dictionary,da)
+            recon = self.getReconstruction(Dictionary)
 
-            self.error = imageSetArray - recon
-            self.error[startBuffIdx,:] = 0
-            self.error[endBuffIdx,:]   = 0
+            error[iteration,:,:] = imageSetArray - recon
+            error[iteration,startBuffIdx,:] = 0
+            error[iteration,endBuffIdx,:]   = 0
 
-            Eold = E
-            E = (0.5 * lambdaN * np.sum(np.square(self.error)) + beta * np.sum(S(self.activities/sigma)))/numValid
-            if (E - Eold) > 0:
-                self.activities[:] = 0
-                break
+            energy[iteration] = (0.5 * lambdaN * np.sum(np.square(error[iteration,:,:])) + beta * np.sum(S(self.activities/sigma)))/numValid
+            #if energy[iteration] > energy[iteration-1]:
+            #    print "Warning: Energy not decreasing on iteration "+str(iteration).zfill(2)+"."
+            #    #self.activities[:] = 0
+            #    #break
+
+        self.error = error[numIterations-1,:,:]
+        return energy, error
             
 
-    def getReconstruction(self,Dictionary,activity=-1,saveRecon=False,reconSavePath=''):
+    def plotReconstruction(self, Dictionary, activity=-1):
+        recon = getReconstruction(Dictionary, activity
+
+    def getReconstruction(self, Dictionary, activity=-1, plotRecon=False, saveRecon=False, reconSavePath=''):
         if type(activity) is not np.ndarray: # If activity has not been given as input, use member variable
             activity = self.activities
 
         (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
 
+        #TODO: Normalization is not in Bruno's code, but without it I'm not sure how it is guaranteed to be between 0 & 1
         recon = np.zeros((self.setSizeT,sizeYX))
         for tIdx in range(dictSizeT):
             imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
-            recon[imgSetWindow,:] += np.dot(activity,Dictionary.weightSet[tIdx,:,:].transpose())
+            recon[imgSetWindow,:] += _normalize(np.dot(activity,Dictionary.weightSet[tIdx,:,:].transpose()))
 
-        #TODO: Save recon stuff
+        recon /= len(range(dictSizeT))
+
+        if plotRecon:
+            IPython.embed()
+
+        #if saveRecon:
+            #TODO: Save recons to reconSavePath 
+            
         return recon
 
 
@@ -387,7 +408,6 @@ class Dictionary:
                        of elements initialized to random non-zero values within (0,1].
 
         '''
-
         self.sizeT       = weightSizeT
         self.patchSize   = weightPatchSize
         self.numElements = numElements
@@ -415,9 +435,9 @@ class Dictionary:
         Basis functions are updated by an ammount proportional to the correlation
         between the residual error e and the coefficients a.
 
-        d phi_i(x,y,t)/dt <- < corr(a_i(t) error(x,y,t)) >
+        d phi_i(x,y,t)/dt \propto < corr(a_i(t) error(x,y,t)) >
 
-        d phi_i(x,y,t)/dt <- < a_i(t) sum_t{phi_i(x,y,-t) (I(x,y,t) - sum_i{sum_t'{a_i(t-t')phi_i(t-t')}})} >
+        d phi_i(x,y,t)/dt \propto < a_i(t) sum_t{phi_i(x,y,-t) (I(x,y,t) - sum_i{sum_t'{a_i(t-t')phi_i(t-t')}})} >
 
         Inputs:
             errors = reconstruction errors computed during sparse approximation
@@ -502,17 +522,8 @@ class Dictionary:
         plt.imshow(dispWeights,cmap='Greys',interpolation='nearest')
         plt.show(block=False)
 
-                
-
-
-
-
     #def saveWeights(self,savePath):
         # save the weights to file
 
-
     #def loadWeights(self,loadPath):
         # load the weights from file
-
-
-
