@@ -20,9 +20,8 @@ import errno
 
 from scipy.signal import convolve
 import numpy as np
-import matplotlib.pyplot as plt
-import skimage.io as io
-from PIL import Image
+#import skimage.io as io
+from PIL import Image # TODO: Switch functions to skimage
 
 import IPython
 
@@ -275,9 +274,11 @@ class SparseNet:
         self.numNeurons = numElements 
         self.setSizeT   = setSizeT
         # activities are initialized to the size of the image set minus a margin on either end to resolve convolution edge effects
-        self.activities = np.zeros((setSizeT-dictSizeT,numElements)) 
+        self.activities = np.zeros((setSizeT-dictSizeT,numElements)) #NOTE: Bruno's code has this as setSizeT-dictSizeT+1
         self.error      = np.zeros((setSizeT,sizeYX))
 
+    def clearActivities(self):
+        self.activities[:] = 0
 
     def sparseApproximation(self,imageSetArray,Dictionary,lambdaN,beta,sigma,eta,numIterations):
         '''
@@ -309,17 +310,17 @@ class SparseNet:
         (dictSizeT, sizeYX, numElements) = Dictionary.weightSet.shape
 
         energy       = np.zeros((numIterations))
-        error        = np.zeros((numIterations,self.setSizeT,sizeYX))
-        margin       = np.floor(dictSizeT/2) # Time buffer of zeros to stop edge effects with convolution. Assumes dictSizeT is odd.
+        error        = np.zeros((numIterations, self.setSizeT, sizeYX))
+        margin       = np.floor(dictSizeT/2)      # Time buffer of zeros to stop edge effects with convolution. Assumes dictSizeT is odd.
         numValid     = self.setSizeT - 2 * margin # number of valid entries in image array
-        startBuffIdx = np.arange(0,margin,dtype=np.int)
-        endBuffIdx   = np.arange(self.setSizeT-margin,self.setSizeT,dtype=np.int)
+        startBuffIdx = np.arange(0, margin, dtype=np.int)
+        endBuffIdx   = np.arange(self.setSizeT-margin, self.setSizeT, dtype=np.int)
 
         imageSetArray[startBuffIdx,:] = 0
         imageSetArray[endBuffIdx,:]   = 0
 
         # Set activity to dot product on first iteration
-        if np.all(self.activities==0): # Check to make sure we are not using a pre-initialized activity set
+        if np.all(self.activities == 0): # Check to make sure we are not using a pre-initialized activity set
             # Initial activity is the time-correlation between the dictionary element & the input
             for tIdx in range(dictSizeT):
                 imgSetWindow = np.arange(tIdx, self.setSizeT-(dictSizeT-tIdx), dtype=int) # Sliding window to compute activity
@@ -342,8 +343,10 @@ class SparseNet:
         for iteration in range(1,numIterations):
             grada = 0
             for tIdx in range(dictSizeT):
+                #NOTE: Bruno's code creates a 58 element list from 1 to 58, I create a 57 (64-7) element list from 0 to 56.
                 imgSetWindow = np.arange(tIdx,self.setSizeT-(dictSizeT-tIdx),dtype=int) # Sliding window to compute activity
                 grada += lambdaN * np.dot(error[iteration,imgSetWindow,:], Dictionary.weightSet[tIdx,:,:])
+                IPython.embed()
 
             grada -= (beta/sigma) * Sp(self.activities/sigma)
 
@@ -356,19 +359,17 @@ class SparseNet:
             error[iteration,endBuffIdx,:]   = 0
 
             energy[iteration] = (0.5 * lambdaN * np.sum(np.square(error[iteration,:,:])) + beta * np.sum(S(self.activities/sigma)))/numValid
-            #if energy[iteration] > energy[iteration-1]:
-            #    print "Warning: Energy not decreasing on iteration "+str(iteration).zfill(2)+"."
-            #    #self.activities[:] = 0
-            #    #break
+
+            if energy[iteration] > energy[iteration-1]:
+                print "Warning: Energy not decreasing on iteration "+str(iteration).zfill(2)+"."
+                self.clearActivities()
+                IPython.embed()
+                break
 
         self.error = error[numIterations-1,:,:]
         return energy, error
-            
 
-    def plotReconstruction(self, Dictionary, activity=-1):
-        recon = getReconstruction(Dictionary, activity
-
-    def getReconstruction(self, Dictionary, activity=-1, plotRecon=False, saveRecon=False, reconSavePath=''):
+    def getReconstruction(self, Dictionary, activity=-1):
         if type(activity) is not np.ndarray: # If activity has not been given as input, use member variable
             activity = self.activities
 
@@ -382,14 +383,8 @@ class SparseNet:
 
         recon /= len(range(dictSizeT))
 
-        if plotRecon:
-            IPython.embed()
-
-        #if saveRecon:
-            #TODO: Save recons to reconSavePath 
-            
         return recon
-
+            
 
 class Dictionary:
     'Learned basis set'
@@ -412,16 +407,21 @@ class Dictionary:
         self.patchSize   = weightPatchSize
         self.numElements = numElements
         
-        self.weightSet   = np.zeros((weightSizeT,weightPatchSize,numElements))
 
         if type(initMode) is str:
-            initType = initMode
+            initType = initMode.lower()
         elif type(initMode) is tuple:
-            initType = initMode[0]
+            initType = initMode[0].lower()
+            initParams = initMode[1:]
 
         #TODO: Implement other initialization modes
         if initType == 'rand':
+            self.weightSet = np.zeros((weightSizeT,weightPatchSize,numElements))
             self.weightSet[:,:,:] = np.random.rand(weightSizeT,weightPatchSize,numElements)
+        elif initType == 'ones':
+            self.weightSet = np.ones((weightSizeT,weightPatchSize,numElements))
+        else:
+            self.weightSet = np.zeros((weightSizeT,weightPatchSize,numElements))
 
         self.gain = np.sqrt(np.sum(np.sum(np.multiply(self.weightSet,self.weightSet),axis=1),axis=0)).transpose()
 
@@ -481,7 +481,7 @@ class Dictionary:
             self.weightSet[:,:,elm] = self.gain[elm] * self.weightSet[:,:,elm] / normPhi[elm]
 
 
-    def plotWeights(self,margin=4,numElements=-1,indices='all'):
+    def makeWeightImg(self, numSubImages=-1, margin=4, numElements=-1, indices='all', bkgrnd='white'):
         '''
         Plots weights
 
@@ -493,6 +493,12 @@ class Dictionary:
             numElements = self.numElements
             indices = 'all'
 
+        if numSubImages <= 0:
+            numSubImages = 1
+            numElementsPerPlot = numElements
+        else:
+            numElementsPerPlot = np.int32(np.floor(numElements/numSubImages))
+            
         if indices is 'rand':
             elementIndices = np.random.random_integers(0,self.numElements-1,numElements)
         elif indices is 'all':
@@ -500,27 +506,37 @@ class Dictionary:
         else:
             elementIndices = indices
 
-        # Out matrix is backwards from normal convention (elements-by-time instead of the other way around).
+        # Output matrix is backwards from normal convention (elements-by-time instead of the other way around).
         # This is so that it is formatted for matplotlib.
-        dispWeights = np.zeros((numElements*(patchSide+margin),self.sizeT*(patchSide+margin)))
-        
-        dictElement = np.zeros((patchSide+margin,patchSide+margin))
+        if bkgrnd == 'white':
+            dispWeights = np.zeros((numSubImages, numElementsPerPlot*(patchSide+margin), self.sizeT*(patchSide+margin)))
+            dictElement = np.zeros((patchSide+margin,patchSide+margin))
+        else: # TODO: More background options
+            dispWeights = np.ones((numSubImages, numElementsPerPlot*(patchSide+margin), self.sizeT*(patchSide+margin)))
+            dictElement = np.ones((patchSide+margin,patchSide+margin))
+
         halfMargin  = np.floor(margin/2)
         xpos = 0
         ypos = 0
+        subPlotIdx = 0
+        numElmInSub = 0
         for elmIdx in elementIndices: # element traverses rows 
             for tIdx in range(self.sizeT):     # t traverses columns 
-                dictElement[halfMargin:halfMargin+patchSide,halfMargin:halfMargin+patchSide] = self.weightSet[tIdx,:,elmIdx].reshape(patchSide,patchSide)
-                dispWeights[ypos:ypos+patchSide+margin,xpos:xpos+patchSide+margin] = dictElement
-
+                dictElement[halfMargin:halfMargin+patchSide, halfMargin:halfMargin+patchSide] = \
+                        self.weightSet[tIdx, :, elmIdx].reshape(patchSide, patchSide)
+                dispWeights[subPlotIdx, ypos:ypos+patchSide+margin, xpos:xpos+patchSide+margin] = dictElement
                 xpos += patchSide+margin
-                if xpos > dispWeights.shape[1]-(patchSide+margin):
+                if xpos > dispWeights.shape[2]-(patchSide+margin):
                     ypos += patchSide+margin
                     xpos = 0
+            numElmInSub += 1
+            if numElmInSub == numElementsPerPlot:
+                subPlotIdx += 1
+                numElmInSub = 0
+                xpos = 0
+                ypos = 0
 
-        plt.figure()
-        plt.imshow(dispWeights,cmap='Greys',interpolation='nearest')
-        plt.show(block=False)
+        return dispWeights
 
     #def saveWeights(self,savePath):
         # save the weights to file

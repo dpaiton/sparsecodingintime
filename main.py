@@ -13,44 +13,17 @@
 #FIXME:
 #
 ########
-import sparsetime
+# Development libraries
 import numpy as np
 
-# Development libraries
-import matplotlib.pyplot as plt
-import skimage.io as io
+# Local libraries
+import sparsetime
+import plot_functions as pf
+
+# Debugging libraries
 import IPython
+import matplotlib.pyplot as plt
 
-def plotDictionary(weights,margin=4):
-    [sizeT, sizeYX, numElements] = weights.shape
-    patchSide = np.int32(np.sqrt(sizeYX))
-    elementIndices = range(numElements)
-    dispWeights = np.zeros((numElements*(patchSide+margin), sizeT*(patchSide+margin)))
-    dictElement = np.zeros((patchSide+margin, patchSide+margin))
-    halfMargin  = np.floor(margin/2)
-    xpos = 0
-    ypos = 0
-    for elmIdx in elementIndices:      
-        for tIdx in range(sizeT): 
-            dictElement[halfMargin:halfMargin+patchSide, halfMargin:halfMargin+patchSide] = \
-                    weights[tIdx, :, elmIdx].reshape(patchSide, patchSide)
-            dispWeights[ypos:ypos+patchSide+margin, xpos:xpos+patchSide+margin] = dictElement
-            xpos += patchSide + margin
-            if xpos > dispWeights.shape[1]-(patchSide+margin):
-                ypos += patchSide+margin
-                xpos = 0
-    plt.figure()
-    plt.imshow(dispWeights,cmap='Greys',interpolation='nearest')
-    plt.show(block=False)
-
-def plotActivity(activity):
-    [numBatches, batchSize, sizeT, numElements] = activity.shape
-    element_activity = np.zeros((numElements,numBatches*batchSize*sizeT))
-    for element in range(numElements):
-        element_activity[element,:] = activity[:,:,:,element].flatten(order='C')
-    plt.figure()
-    plt.plot(element_activity.T)
-    plt.show(block=False)
 
 # User defined paths
 rootDir = "/Users/dpaiton/Work/"
@@ -76,6 +49,7 @@ print("Done.")
 #print("Done.")
 
 #########################################################################
+#########################################################################
 #### Learning ####
 #
 # For each batch, we load a single 114 x 114 x 64 frame sequence
@@ -88,9 +62,10 @@ print("Done.")
 # Basis set has 200 functions, each of size 12px x 12px x 7 frames. 
 #
 #########################################################################
+#########################################################################
 
 ## Dictionary params
-numElements = 10#200
+numElements = 200
 dictSizeY   = 12
 dictSizeX   = 12
 dictSizeT   = 7
@@ -100,7 +75,7 @@ varGoal     = varData # goal variance of weights - from video
 varEta      = 0.01    # adaptation rate of time constant to compute variance
 
 ## Sparse approximation params
-numBatches    = 1
+numBatches    = 500
 batchSize     = 10
 noiseVar      = 0.005
 beta          = 2.5   # parameters for fita - used for energy & gradient calculation
@@ -117,7 +92,6 @@ numValid = blockSize - 2*margin  # Number of valid entries in image array
 
 print("Initializing dictionary...")
 Phi  = sparsetime.Dictionary(dictSizeT,dictSizeY*dictSizeX,numElements,initMode='rand')
-dPhi = np.zeros_like(Phi.weightSet) 
 print("Done.")
 
 #TODO: Initialization requrires dictionary so that arrays can be allocated to correct size
@@ -125,33 +99,53 @@ print("Done.")
 #      sparse approximation is called with a dictionary passed to it
 sparseNet = sparsetime.SparseNet(Phi,blockSize) # Must be initialized with a dictionary
 
-activityHistory = np.zeros((numBatches, batchSize, numIterations-dictSizeT, numElements))
+recFigNo  = None
+dPhiFigNo = None
+
+(phiFigNo, phiFigAxes) = pf.showWeightsFromImg(Phi.makeWeightImg(numSubImages=8))
+(varFigNo, varFigAxes) = pf.plotBars(data=(Phi.gain, aVar), titles=('Phi', 'aVar'))
+(actFigNo, actImgObj) = pf.showActivity(sparseNet.activities)
+
+imagePatch = sparsetime._normalize(imgSet.getRandPatch(dictSizeY, dictSizeX))
+(recFigNo, subAxes) = pf.showRecons(imagePatch, imagePatch, sparseNet.error)
+
+IPython.embed()
 
 for batch in range(numBatches):
-    print("Batch number "+str(batch+1).zfill(3)+" out of "+str(numBatches).zfill(3)+"...")
-    for i in range(batchSize):
-        #imagePatch = sparsetime._normalize(imgSet.getRandPatch(dictSizeY, dictSizeX))
-        imagePatch = imgSet.getRandPatch(dictSizeY, dictSizeX)
-        updateRateMod = 1 
-        [energy, error] = sparseNet.sparseApproximation(imagePatch, Phi, lambdaN, beta, sigma, aEta/updateRateMod, numIterations)
-        dPhi = Phi.computeUpdates(sparseNet, dPhi)
-        recon = sparseNet.getReconstruction(Phi, sparseNet.activities, True)
-        #plotDictionary(dPhi)
-        activityHistory[batch, i, :, :] = sparseNet.activities
-        #IPython.embed()
+    print("\nBatch number "+str(batch+1).zfill(3)+" out of "+str(numBatches).zfill(3)+"...\n")
 
-    aVar = (1-varEta) * aVar + varEta * \
-        np.sum(np.multiply(sparseNet.activities, sparseNet.activities), axis=0) / numValid
+    dPhi = np.zeros_like(Phi.weightSet) 
+    for i in range(batchSize):
+        print("Trial number "+str(i+1).zfill(3)+" out of "+str(batchSize).zfill(3)+"...")
+
+        sparseNet.clearActivities()
+        while np.all(sparseNet.activities == 0): # Get new patch if current patch caused instability
+            imagePatch = sparsetime._normalize(imgSet.getRandPatch(dictSizeY, dictSizeX))
+            #imagePatch = imgSet.getRandPatch(dictSizeY, dictSizeX) # If I don't normalize the patch, my energy blows up
+
+            updateRateMod = 1 
+            while np.all(sparseNet.activities == 0) and updateRateMod <= 4: # Divide eta by 2 if network is unstable, only make 3 attempts
+                [energy, error] = sparseNet.sparseApproximation(imagePatch, Phi, lambdaN, beta, sigma, aEta/updateRateMod, numIterations)
+                updateRateMod *= 2
+
+            #IPython.embed()
+
+        dPhi = Phi.computeUpdates(sparseNet, dPhi)
+        aVar = (1-varEta) * aVar + \
+                varEta * np.sum(np.multiply(sparseNet.activities, sparseNet.activities), axis=0) / numValid
+
+        (recFigNo, subAxes) = pf.showRecons(imagePatch, sparseNet.getReconstruction(Phi), error[-1,:,:], (recFigNo, subAxes))
+        #dPhiFigNo = pf.showDictionary(dPhi, dPhiFigNo)
+        #IPython.embed()
 
     dPhi /= batchSize * numValid 
     Phi.updateWeights(dPhi,weightEta)
     Phi.normalizeWeights(aVar,varGoal,sigma,alpha)
     sparseNet.gain = np.sqrt(np.sum(np.sum(np.multiply(Phi.weightSet,Phi.weightSet),axis=1),axis=0)).transpose()
 
-plotActivity(activityHistory)
+    (phiFigNo, phiFigAxes) = pf.showWeightsFromImg(Phi.makeWeightImg(numSubImages=8), (phiFigNo, phiFigAxes))
+    #(varFigNo, varFigAxes) = pf.plotBars(data=(Phi.gain, aVar), titles=('Phi', 'aVar'), prevFig=(varFigNo, varFigAxes))
 
-plt.figure()
-plt.plot(np.mean(sparseNet.error,axis=1))
-plt.show(block=False)
 
+print "Done"
 IPython.embed()
